@@ -137,15 +137,16 @@ impl<Cost: CostType> vm::Vm for Interpreter<Cost> {
 
 			// TODO: make compile-time removable if too much of a performance hit.
 			do_trace = do_trace && ext.trace_next_instruction(reader.position - 1, instruction);
+			// log step before any exceptions for standardized trace
+			if do_trace {
+				ext.trace_prepare_execute(reader.position - 1, instruction, gasometer.current_gas.as_u256());
+			}
 
 			let info = &infos[instruction as usize];
 			self.verify_instruction(ext, instruction, info, &stack)?;
 
 			// Calculate gas cost
 			let requirements = gasometer.requirements(ext, instruction, info, &stack, self.mem.size())?;
-			if do_trace {
-				ext.trace_prepare_execute(reader.position - 1, instruction, requirements.gas_cost.as_u256());
-			}
 
 			gasometer.verify_gas(&requirements.gas_cost)?;
 			self.mem.expand(requirements.memory_required_size);

@@ -115,10 +115,23 @@ impl trace::VMTracer for Informant {
 		true
 	}
 
-	fn trace_prepare_execute(&mut self, pc: usize, instruction: u8, gas_cost: U256) {
+	fn trace_prepare_execute(&mut self, pc: usize, instruction: u8, current_gas: U256) {
 		self.pc = pc;
 		self.instruction = instruction;
-		self.gas_cost = gas_cost;
+		//self.gas_cost = gas_cost;
+		let info = ::evm::INSTRUCTIONS[self.instruction as usize];
+
+		println!(
+			"{{\"pc\":{pc},\"op\":{op},\"opName\":\"{name}\",\"gas\":{gas},\"stack\":{stack},\"storage\":{storage},\"depth\":{depth}}}",
+			pc = self.pc,
+			op = self.instruction,
+			name = info.name,
+			gas = display::u256_as_str(&(current_gas)),
+			// memory = self.memory(),
+			stack = self.stack(),
+			storage = self.storage(),
+			depth = self.depth,
+		);
 	}
 
 	fn trace_executed(&mut self, gas_used: U256, stack_push: &[U256], mem_diff: Option<(usize, &[u8])>, store_diff: Option<(U256, U256)>) {
@@ -136,7 +149,9 @@ impl trace::VMTracer for Informant {
 			storage = self.storage(),
 			depth = self.depth,
 		);
-		self.traces.push(trace);
+		// for standardized tracing, we use trace_prepare_execute()
+		// we comment out trace_executed() otherwise each step will be duplicated
+		//self.traces.push(trace);
 
 		self.unmatched = false;
 		self.gas_used = gas_used;
