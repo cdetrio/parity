@@ -113,7 +113,8 @@ pub fn run_transaction<T: Informant>(
 					post_root,
 				))), None)
 			},
-			TransactResult::Ok { gas_left, output, vm_trace, .. } => {
+			TransactResult::Ok { state_root, gas_left, output, vm_trace, .. } => {
+				println!("{{\"stateRoot\": \"{:?}\"}}", state_root);
 				(Ok((gas_left, output)), vm_trace)
 			},
 			TransactResult::Err { error, .. } => {
