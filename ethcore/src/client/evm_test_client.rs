@@ -249,6 +249,8 @@ impl<'a> EvmTestClient<'a> {
 		).ok();
 		self.state.commit().ok();
 
+		println!("dumping state!  {:?}", self.state);
+
 		match result {
 			Ok(result) => {
 				TransactResult::Ok {
