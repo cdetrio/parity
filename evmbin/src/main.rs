@@ -25,8 +25,10 @@ extern crate rustc_hex;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
+/*
 #[macro_use]
 extern crate serde_json;
+*/
 extern crate docopt;
 extern crate parity_bytes as bytes;
 extern crate ethereum_types;
@@ -42,59 +44,37 @@ extern crate pretty_assertions;
 #[cfg(test)]
 extern crate tempdir;
 
+use std::time::{Instant};
 use std::sync::Arc;
 use std::{fmt, fs};
-use std::path::PathBuf;
 use docopt::Docopt;
 use rustc_hex::FromHex;
 use ethereum_types::{U256, Address};
 use bytes::Bytes;
-use ethcore::{spec, json_tests, TrieSpec};
-use vm::{ActionParams, CallType};
+use bytes::ToPretty;
+use vm::ActionParams;
 
-mod info;
-mod display;
-
-use info::Informant;
+//mod info;
+//mod display;
 
 const USAGE: &'static str = r#"
 EVM implementation for Parity.
   Copyright 2015-2019 Parity Technologies (UK) Ltd.
 
 Usage:
-    parity-evm state-test <file> [--json --std-json --std-dump-json --only NAME --chain CHAIN --std-out-only --std-err-only]
-    parity-evm stats [options]
-    parity-evm stats-jsontests-vm <file>
     parity-evm [options]
     parity-evm [-h | --help]
 
-Commands:
-    state-test         Run a state test from a json file.
-    stats              Execute EVM runtime code and return the statistics.
-    stats-jsontests-vm Execute standard json-tests format VMTests and return
-                       timing statistics in tsv format.
-
 Transaction options:
+    --code-file CODEFILE    Read contract code from file as hex (without 0x).
     --code CODE        Contract code as hex (without 0x).
     --to ADDRESS       Recipient address (without 0x).
     --from ADDRESS     Sender address (without 0x).
     --input DATA       Input data as hex (without 0x).
+    --expected DATA    Expected return data as hex (without 0x).
     --gas GAS          Supplied gas as hex (without 0x).
     --gas-price WEI    Supplied gas price as hex (without 0x).
 
-State test options:
-    --only NAME        Runs only a single test matching the name.
-    --chain CHAIN      Run only tests from specific chain.
-
-General options:
-    --json             Display verbose results in JSON.
-    --std-json         Display results in standardized JSON format.
-    --std-err-only     With --std-json redirect to err output only.
-    --std-out-only     With --std-json redirect to out output only.
-    --std-dump-json    Display results in standardized JSON format
-                       with additional state dump.
-Display result state dump in standardized JSON format.
-    --chain CHAIN      Chain spec file path.
     -h, --help         Display this message and exit.
 "#;
 
@@ -104,154 +84,82 @@ fn main() {
 
 	let args: Args = Docopt::new(USAGE).and_then(|d| d.deserialize()).unwrap_or_else(|e| e.exit());
 
-	if args.cmd_state_test {
-		run_state_test(args)
-	} else if args.cmd_stats_jsontests_vm {
-		run_stats_jsontests_vm(args)
-	} else if args.flag_json {
-		run_call(args, display::json::Informant::default())
-	} else if args.flag_std_dump_json || args.flag_std_json {
-		if args.flag_std_err_only {
-			run_call(args, display::std_json::Informant::err_only())
-		} else if args.flag_std_out_only {
-			run_call(args, display::std_json::Informant::out_only())
-		} else {
-			run_call(args, display::std_json::Informant::default())
-		};
-	} else {
-		run_call(args, display::simple::Informant::default())
-	}
+	run_call(args)
 }
 
-fn run_stats_jsontests_vm(args: Args) {
-	use json_tests::HookType;
-	use std::collections::HashMap;
-	use std::time::{Instant, Duration};
-
-	let file = args.arg_file.expect("FILE (or PATH) is required");
-
-	let mut timings: HashMap<String, (Instant, Option<Duration>)> = HashMap::new();
-
-	{
-		let mut record_time = |name: &str, typ: HookType| {
-			match typ {
-				HookType::OnStart => {
-					timings.insert(name.to_string(), (Instant::now(), None));
-				},
-				HookType::OnStop => {
-					timings.entry(name.to_string()).and_modify(|v| {
-						v.1 = Some(v.0.elapsed());
-					});
-				},
-			}
-		};
-		if !file.is_file() {
-			json_tests::run_executive_test_path(&file, &[], &mut record_time);
-		} else {
-			json_tests::run_executive_test_file(&file, &mut record_time);
-		}
-	}
-
-	for (name, v) in timings {
-		println!("{}\t{}", name, display::as_micros(&v.1.expect("All hooks are called with OnStop; qed")));
-	}
-}
-
-fn run_state_test(args: Args) {
-	use ethjson::state::test::Test;
-
-	let file = args.arg_file.expect("FILE is required");
-	let mut file = match fs::File::open(&file) {
-		Err(err) => die(format!("Unable to open: {:?}: {}", file, err)),
-		Ok(file) => file,
-	};
-	let state_test = match Test::load(&mut file) {
-		Err(err) => die(format!("Unable to load the test file: {}", err)),
-		Ok(test) => test,
-	};
-	let only_test = args.flag_only.map(|s| s.to_lowercase());
-	let only_chain = args.flag_chain.map(|s| s.to_lowercase());
-
-	for (name, test) in state_test {
-		if let Some(false) = only_test.as_ref().map(|only_test| &name.to_lowercase() == only_test) {
-			continue;
-		}
-
-		let multitransaction = test.transaction;
-		let env_info = test.env.into();
-		let pre = test.pre_state.into();
-
-		for (spec, states) in test.post_states {
-			if let Some(false) = only_chain.as_ref().map(|only_chain| &format!("{:?}", spec).to_lowercase() == only_chain) {
-				continue;
-			}
-
-			for (idx, state) in states.into_iter().enumerate() {
-				let post_root = state.hash.into();
-				let transaction = multitransaction.select(&state.indexes).into();
-
-				let trie_spec = if args.flag_std_dump_json {
-					TrieSpec::Fat
-				} else {
-					TrieSpec::Secure
-				};
-				if args.flag_json {
-					info::run_transaction(&name, idx, &spec, &pre, post_root, &env_info, transaction, display::json::Informant::default(), trie_spec)
-				} else if args.flag_std_dump_json || args.flag_std_json {
-					if args.flag_std_err_only {
-						info::run_transaction(&name, idx, &spec, &pre, post_root, &env_info, transaction, display::std_json::Informant::err_only(), trie_spec)
-					} else if args.flag_std_out_only {
-						info::run_transaction(&name, idx, &spec, &pre, post_root, &env_info, transaction, display::std_json::Informant::out_only(), trie_spec)
-					} else {
-						info::run_transaction(&name, idx, &spec, &pre, post_root, &env_info, transaction, display::std_json::Informant::default(), trie_spec)
-					}
-				} else {
-					info::run_transaction(&name, idx, &spec, &pre, post_root, &env_info, transaction, display::simple::Informant::default(), trie_spec)
-				}
-			}
-		}
-	}
-}
-
-fn run_call<T: Informant>(args: Args, informant: T) {
-	let from = arg(args.from(), "--from");
-	let to = arg(args.to(), "--to");
+fn run_call(args: Args) {
+	let _from = arg(args.from(), "--from");
+	let _to = arg(args.to(), "--to");
+	let code_file = arg(args.code_file(), "--code-file");
 	let code = arg(args.code(), "--code");
-	let spec = arg(args.spec(), "--chain");
-	let gas = arg(args.gas(), "--gas");
-	let gas_price = arg(args.gas_price(), "--gas-price");
-	let data = arg(args.data(), "--input");
+	let _gas = arg(args.gas(), "--gas");
+	let _gas_price = arg(args.gas_price(), "--gas-price");
+	let calldata = arg(args.data(), "--input");
+    let expected = arg(args.expected(), "--expected");
 
-	if code.is_none() && to == Address::default() {
-		die("Either --code or --to is required.");
+	if code.is_none() && code_file.is_none() {
+		die("Either --code or --code-file is required.");
 	}
 
-	let mut params = ActionParams::default();
-	params.call_type = if code.is_none() { CallType::Call } else { CallType::None };
-	params.code_address = to;
-	params.address = to;
-	params.sender = from;
-	params.origin = from;
-	params.gas = gas;
-	params.gas_price = gas_price;
-	params.code = code.map(Arc::new);
-	params.data = data;
+    if expected.is_none() {
+        die("Expected return data --expected is required.");
+    }
 
-	let mut sink = informant.clone_sink();
-	let result = if args.flag_std_dump_json {
-		info::run_action(&spec, params, informant, TrieSpec::Fat)
-	} else {
-		info::run_action(&spec, params, informant, TrieSpec::Secure)
-	};
-	T::finish(result, &mut sink);
+    let code = code_file.unwrap();
+    let expected_return = expected.unwrap().clone();
+
+    //let gas = U256::from(::std::usize::MAX);
+    let gas = U256::from(1000000);
+
+    let mut params = ActionParams::default();
+    params.gas = gas;
+    params.code = Some(Arc::new(code.clone()));
+    params.data = calldata.clone();
+
+    let spec = ethcore::ethereum::new_constantinople_test();
+    let mut test_client = ethcore::client::EvmTestClient::new(&spec).unwrap();
+    let call_result = test_client.call(params, &mut ethcore::trace::NoopTracer, &mut ethcore::trace::NoopVMTracer).unwrap();
+    let return_data = call_result.return_data.to_vec().to_hex();
+    println!("return_data: {:?}", return_data);
+    println!("gas used: {:?}", gas - call_result.gas_left);
+
+    if return_data != expected_return {
+        println!("Wrong return data!  got: {:?}   expected: {:?}", return_data, expected_return);
+        die("wrong return data.");
+    }
+
+
+    let iterations = 100;
+    let mut total_duration = std::time::Duration::new(0, 0);
+
+    for _i in 0..iterations {
+        let mut params = ActionParams::default();
+        params.gas = gas;
+        params.code = Some(Arc::new(code.clone()));
+        params.data = calldata.clone();
+
+        let spec = ethcore::ethereum::new_constantinople_test();
+        let mut test_client = ethcore::client::EvmTestClient::new(&spec).unwrap();
+
+        let start_run = Instant::now();
+
+        let _result = test_client.call(params, &mut ethcore::trace::NoopTracer, &mut ethcore::trace::NoopVMTracer).unwrap();
+
+        let run_duration = start_run.elapsed();
+        total_duration = total_duration + run_duration;
+    }
+
+    let avg_duration = total_duration / iterations;
+    println!("code avg run time: {:?}", avg_duration);
+
 }
+
+
+
 
 #[derive(Debug, Deserialize)]
 struct Args {
-	cmd_stats: bool,
-	cmd_state_test: bool,
-	cmd_stats_jsontests_vm: bool,
-	arg_file: Option<PathBuf>,
+    flag_code_file: Option<String>,
 	flag_only: Option<String>,
 	flag_from: Option<String>,
 	flag_to: Option<String>,
@@ -259,12 +167,7 @@ struct Args {
 	flag_gas: Option<String>,
 	flag_gas_price: Option<String>,
 	flag_input: Option<String>,
-	flag_chain: Option<String>,
-	flag_json: bool,
-	flag_std_json: bool,
-	flag_std_dump_json: bool,
-	flag_std_err_only: bool,
-	flag_std_out_only: bool,
+    flag_expected: Option<String>,
 }
 
 impl Args {
@@ -310,17 +213,24 @@ impl Args {
 		}
 	}
 
-	pub fn spec(&self) -> Result<spec::Spec, String> {
-		Ok(match self.flag_chain {
-			Some(ref filename) => {
-				let file = fs::File::open(filename).map_err(|e| format!("{}", e))?;
-				spec::Spec::load(&::std::env::temp_dir(), file)?
-			},
-			None => {
-				ethcore::ethereum::new_foundation(&::std::env::temp_dir())
-			},
-		})
+	pub fn expected(&self) -> Result<Option<String>, String> {
+		match self.flag_expected {
+			Some(ref expected) => expected.parse().map_err(to_string).map(Some),
+			None => Ok(None),
+		}
 	}
+
+    pub fn code_file(&self) -> Result<Option<Bytes>, String> {
+        match self.flag_code_file {
+            Some(ref filename) => {
+                let code_hex = fs::read_to_string(filename).unwrap();
+                println!("code_hex length: {:?}", code_hex.len());
+                code_hex.from_hex().map_err(to_string).map(Some)
+            },
+            None => Ok(None),
+        }
+    }
+
 }
 
 fn arg<T>(v: Result<T, String>, param: &str) -> T {
@@ -349,51 +259,20 @@ mod tests {
 	fn should_parse_all_the_options() {
 		let args = run(&[
 			"parity-evm",
-			"--json",
-			"--std-json",
-			"--std-dump-json",
 			"--gas", "1",
 			"--gas-price", "2",
 			"--from", "0000000000000000000000000000000000000003",
 			"--to", "0000000000000000000000000000000000000004",
 			"--code", "05",
 			"--input", "06",
-			"--chain", "./testfile", "--std-err-only", "--std-out-only"
 		]);
 
-		assert_eq!(args.flag_json, true);
-		assert_eq!(args.flag_std_json, true);
-		assert_eq!(args.flag_std_dump_json, true);
-		assert_eq!(args.flag_std_err_only, true);
-		assert_eq!(args.flag_std_out_only, true);
 		assert_eq!(args.gas(), Ok(1.into()));
 		assert_eq!(args.gas_price(), Ok(2.into()));
 		assert_eq!(args.from(), Ok(3.into()));
 		assert_eq!(args.to(), Ok(4.into()));
 		assert_eq!(args.code(), Ok(Some(vec![05])));
 		assert_eq!(args.data(), Ok(Some(vec![06])));
-		assert_eq!(args.flag_chain, Some("./testfile".to_owned()));
 	}
 
-	#[test]
-	fn should_parse_state_test_command() {
-		let args = run(&[
-			"parity-evm",
-			"state-test",
-			"./file.json",
-			"--chain", "homestead",
-			"--only=add11",
-			"--json",
-			"--std-json",
-			"--std-dump-json"
-		]);
-
-		assert_eq!(args.cmd_state_test, true);
-		assert!(args.arg_file.is_some());
-		assert_eq!(args.flag_json, true);
-		assert_eq!(args.flag_std_json, true);
-		assert_eq!(args.flag_std_dump_json, true);
-		assert_eq!(args.flag_chain, Some("homestead".to_owned()));
-		assert_eq!(args.flag_only, Some("add11".to_owned()));
-	}
 }
